@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""List Claude Code sessions as a tree of their working directories (fzf).
+
+  claude-sessions            picker in the current terminal: Enter resumes a stopped
+                             session here, or focuses a running one's sway window
+  claude-sessions --start    sway: start the picker in a hidden scratchpad window
+  claude-sessions --toggle   sway: show (and refresh) / hide that window (hotkey);
+                             there Enter resumes in a new terminal window
+
+CLAUDE_SESSIONS_TERMINAL: terminal for the sway window mode, alacritty (default) or foot."""
+import calendar, glob, json, os, re, shlex, subprocess, sys, time
+
+HOME = os.path.expanduser('~')
+CLAUDE_DIR = os.environ.get('CLAUDE_CONFIG_DIR') or f'{HOME}/.claude'
+PROJECTS = f'{CLAUDE_DIR}/projects'
+# optional Alacritty config for the picker window (e.g. other colors)
+TERM_CONFIG = f"{os.environ.get('XDG_CONFIG_HOME') or HOME + '/.config'}/alacritty/claude-sessions.toml"
+APP_ID = 'claude-sessions'
+SWAY = bool(os.environ.get('SWAYSOCK'))
+TERMINAL = os.environ.get('CLAUDE_SESSIONS_TERMINAL', 'alacritty')
+SOCKET = f"{os.environ.get('XDG_RUNTIME_DIR', '/tmp')}/claude-sessions.sock"
+ME = os.path.abspath(__file__)
+# fzf action: reload the list in the current mode (prompt all> / running>)
+REFRESH = (f'[[ $FZF_PROMPT == all* ]] && echo "reload({shlex.quote(ME)} --list all)"'
+           f' || echo "reload({shlex.quote(ME)} --list running)"')
+GREEN, RED, DIM, BOLD, RESET = '\033[32m', '\033[31m', '\033[2m', '\033[1m', '\033[0m'
+
+
+def running_sessions():
+    """sessionId -> {pid, cwd} for live Claude processes"""
+    out = {}
+    for f in glob.glob(f'{CLAUDE_DIR}/sessions/*.json'):
+        try:
+            d = json.load(open(f))
+            with open(f'/proc/{d["pid"]}/stat') as s:
+                start = s.read().rsplit(')', 1)[1].split()[19]
+        except (OSError, ValueError, KeyError, IndexError):
+            continue
+        if str(d.get('procStart')) == start:
+            out[d['sessionId']] = {'pid': d['pid'], 'cwd': d['cwd'], 'status': d.get('status')}
+    return out
+
+
+def read_session(path):
+    """(cwd, title) from a transcript: cwd from the head, title from the tail"""
+    cwd = title = prompt = None
+    with open(path, 'rb') as f:
+        for line in f:
+            m = re.search(rb'"cwd":"((?:[^"\\]|\\.)*)"', line)
+            if m:
+                if b'"entrypoint":"sdk-cli"' in line:  # headless `claude -p`
+                    return None, None
+                cwd = json.loads(b'"' + m.group(1) + b'"')
+                break
+        size = f.seek(0, 2)
+        for chunk in (2**20, size):  # the tail usually has a title; else read all
+            f.seek(max(0, size - chunk))
+            for line in f.read().split(b'\n'):
+                if b'"type":"ai-title"' in line:
+                    title = json.loads(line).get('aiTitle') or title
+                elif b'"type":"last-prompt"' in line:
+                    prompt = json.loads(line).get('lastPrompt') or prompt
+            if title or chunk >= size:
+                break
+    return cwd, (title or prompt or '').replace('\n', ' ').strip()
+
+
+def sessions():
+    running = running_sessions()
+    out = {}
+    for path in glob.glob(f'{PROJECTS}/*/*.jsonl'):
+        sid = os.path.basename(path)[:-6]
+        try:
+            cwd, title = read_session(path)
+        except (OSError, ValueError):
+            continue
+        if not cwd and sid not in running:
+            continue
+        out[sid] = {'id': sid, 'cwd': cwd, 'title': title, 'mtime': os.path.getmtime(path), 'path': path}
+    for sid, r in running.items():
+        s = out.setdefault(sid, {'id': sid, 'title': '(new)', 'mtime': time.time()})
+        s.update(cwd=r['cwd'], pid=r['pid'])
+    return list(out.values())
+
+
+def tilde(path):
+    return '~' + path[len(HOME):] if (path + '/').startswith(HOME + '/') else path
+
+
+def tree_lines(items):
+    """fzf lines "id<TAB>display", directories as nodes, sessions as leaves"""
+    root = {'dirs': {}, 'sessions': []}
+    for s in items:
+        node = root
+        for part in tilde(s['cwd']).strip('/').split('/'):
+            node = node['dirs'].setdefault(part, {'dirs': {}, 'sessions': []})
+        node['sessions'].append(s)
+
+    lines = []
+
+    def walk(node, prefix, path):
+        kids = [('s', s) for s in sorted(node['sessions'], key=lambda s: -s['mtime'])]
+        kids += [('d', k) for k in sorted(node['dirs'])]
+        for i, (kind, k) in enumerate(kids):
+            last = i == len(kids) - 1
+            branch = prefix + ('└─ ' if last else '├─ ')
+            if kind == 's':
+                color = GREEN if 'pid' in k else RED
+                when = time.strftime('%m-%d %H:%M', time.localtime(k['mtime']))
+                lines.append(f"{k['id']}\t{DIM}{branch}{RESET}{color}●{RESET} {k['title'] or '(untitled)'} {DIM}{when}{RESET}")
+            else:
+                name, child = k, node['dirs'][k]
+                while not child['sessions'] and len(child['dirs']) == 1:  # collapse a/b/c
+                    (sub, child), = child['dirs'].items()
+                    name += '/' + sub
+                lines.append(f"dir:{path}/{name}\t{DIM}{branch}{RESET}{BOLD}{name}/{RESET}")
+                walk(child, prefix + ('   ' if last else '│  '), f'{path}/{name}')
+
+    walk(root, '', '')
+    return lines
+
+
+def sway(cmd):
+    subprocess.run(['swaymsg', cmd], capture_output=True)
+
+
+def windows():
+    """all sway windows (incl. scratchpad)"""
+    if not SWAY:
+        return []
+    tree = json.loads(subprocess.run(['swaymsg', '-t', 'get_tree'], capture_output=True, text=True).stdout)
+    out, stack = [], [tree]
+    while stack:
+        n = stack.pop()
+        if n.get('pid'):
+            out.append(n)
+        stack += n.get('nodes', []) + n.get('floating_nodes', [])
+    return out
+
+
+def clean_env():
+    """environment without the variables of a calling Claude session (else claude runs as its child)"""
+    return {k: v for k, v in os.environ.items() if not k.startswith('CLAUDE') or k == 'CLAUDE_CONFIG_DIR'}
+
+
+def focus(pid):
+    wins = {}
+    for n in windows():
+        wins.setdefault(n['pid'], n['id'])
+    while pid > 1:
+        if pid in wins:
+            subprocess.run(['swaymsg', f'[con_id={wins[pid]}] focus'], capture_output=True)
+            return True
+        with open(f'/proc/{pid}/stat') as s:
+            pid = int(s.read().rsplit(')', 1)[1].split()[1])
+    return False
+
+
+def terminal(cmd, cwd=None, app_id=None):
+    """command line opening a new terminal window that runs cmd"""
+    if TERMINAL == 'foot':
+        return ['foot', *(['--app-id', app_id] if app_id else []), *(['--working-directory', cwd] if cwd else []), *cmd]
+    config = ['--config-file', TERM_CONFIG] if app_id and os.path.exists(TERM_CONFIG) else []
+    return ['alacritty', *(['--class', app_id] if app_id else []), *config,
+            *(['--working-directory', cwd] if cwd else []), '-e', *cmd]
+
+
+def spawn(cmd):
+    subprocess.Popen(cmd, env=clean_env(), start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def resume(s):
+    """in a new terminal window (window mode)"""
+    if not os.path.isdir(s['cwd']):
+        return notify(f"directory gone: {s['cwd']}")
+    shell = os.environ.get('SHELL', '/bin/bash')
+    spawn(terminal([shell, '-ic', 'claude --resume "$1"; exec "$SHELL"', '_', s['id']], cwd=s['cwd']))
+
+
+def resume_here(sid):
+    """in this terminal (plain mode, fzf `become`)"""
+    s = next((s for s in sessions() if s['id'] == sid), None)
+    if not s:
+        return
+    os.chdir(s['cwd'])
+    os.execvpe('claude', ['claude', '--resume', sid], clean_env())
+
+
+def enter_action(sid):
+    """fzf action for Enter in plain mode"""
+    s = next((s for s in sessions() if s['id'] == sid), None)
+    if not s:
+        return
+    me = shlex.quote(ME)
+    if 'pid' not in s:
+        print(f'become({me} --resume-here {sid})')
+    elif SWAY:
+        print(f'execute-silent({me} --focus {sid})')
+
+
+def prompt_text(content):
+    """a user prompt's text, None for tool results and command/system messages"""
+    if isinstance(content, list):
+        if any(c.get('type') == 'tool_result' for c in content):
+            return None
+        content = ' '.join(c.get('text', '') for c in content if c.get('type') == 'text')
+    if not isinstance(content, str) or not content.strip() or content.lstrip().startswith('<'):
+        return None
+    return ' '.join(content.split())
+
+
+def local_time(iso):
+    t = calendar.timegm(time.strptime(iso[:19], '%Y-%m-%dT%H:%M:%S'))
+    return time.strftime('%Y-%m-%d %H:%M', time.localtime(t))
+
+
+def info(sid):
+    """fzf preview: details of a session (or the path of a directory line)"""
+    if sid.startswith('dir:'):
+        return print(f"{BOLD}{sid[5:]}/{RESET}")
+    s = next((s for s in sessions() if s['id'] == sid), None)
+    if not s:
+        return
+    prompts, branch = [], None
+    if s.get('path'):
+        with open(s['path'], 'rb') as f:
+            for line in f:
+                if b'"type":"user"' not in line or b'"toolUseResult"' in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                text = prompt_text(d.get('message', {}).get('content'))
+                if text:
+                    prompts.append((d.get('timestamp'), text))
+                    branch = d.get('gitBranch') or branch
+    tty = None
+    if 'pid' in s:
+        status = f"{GREEN}running{RESET} (pid {s['pid']}, {running_sessions().get(sid, {}).get('status') or '?'})"
+        try:
+            tty = os.readlink(f"/proc/{s['pid']}/fd/0")
+        except OSError:
+            pass
+        if not re.match(r'/dev/(pts/|tty)', tty or ''):
+            tty = None
+    else:
+        status = f'{RED}stopped{RESET}'
+    rows = [('status', status), ('tty', tty), ('dir', tilde(s['cwd'])), ('branch', branch),
+            ('started', local_time(prompts[0][0]) if prompts and prompts[0][0] else None),
+            ('last', time.strftime('%Y-%m-%d %H:%M', time.localtime(s['mtime']))),
+            ('prompts', len(prompts)),
+            ('size', s.get('path') and f"{os.path.getsize(s['path']) / 2**20:.1f} MB"),
+            ('id', sid)]
+    print(f"{BOLD}{s['title'] or '(untitled)'}{RESET}\n")
+    for k, v in rows:
+        if v not in (None, ''):
+            print(f'{DIM}{k:8}{RESET} {v}')
+    if prompts:
+        print(f'\n{BOLD}first prompt{RESET}\n{prompts[0][1][:400]}')
+    if len(prompts) > 1:
+        print(f'\n{BOLD}last prompts{RESET}')
+        for _, text in prompts[-3:][::-1] if len(prompts) > 3 else prompts[1:][::-1]:
+            print(f'- {text[:300]}')
+
+
+def notify(msg):
+    try:
+        subprocess.run(['notify-send', 'claude-sessions', msg])
+    except FileNotFoundError:
+        pass
+
+
+def picker_window():
+    return next((n for n in windows() if n.get('app_id') == APP_ID), None)
+
+
+def start():
+    if os.path.exists(SOCKET):
+        os.unlink(SOCKET)
+    spawn(terminal([ME, '--window'], app_id=APP_ID))
+    for _ in range(50):
+        if picker_window():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def toggle():
+    w = picker_window()
+    if w and w['focused']:
+        return sway(f'[app_id="^{APP_ID}$"] move scratchpad')
+    if w:  # refresh the list (keeps mode and cursor)
+        subprocess.run(['curl', '-s', '-m', '2', '--unix-socket', SOCKET, 'http://localhost',
+                        '--data-binary', f'transform:{REFRESH}'], capture_output=True)
+    elif not start():
+        return notify('picker window did not appear')
+    # via the scratchpad, so it shows on the current workspace
+    sway(f'[app_id="^{APP_ID}$"] move scratchpad')
+    sway(f'[app_id="^{APP_ID}$"] scratchpad show')
+    sway(f'[app_id="^{APP_ID}$"] resize set 70 ppt 70 ppt')
+    sway(f'[app_id="^{APP_ID}$"] move position center')
+
+
+def delete_sessions(ids):
+    """move stopped sessions' files to the trash"""
+    by_id = {s['id']: s for s in sessions()}
+    running = 0
+    for sid in ids:
+        s = by_id.get(sid)
+        if not s:
+            continue
+        if 'pid' in s:
+            running += 1
+            continue
+        files = [s['path'], s['path'][:-6], f'{CLAUDE_DIR}/file-history/{sid}', f'{CLAUDE_DIR}/session-env/{sid}']
+        subprocess.run(['gio', 'trash', '--', *[f for f in files if os.path.exists(f)]])
+    if running:
+        notify(f'{running} running session(s) not deleted')
+
+
+def open_session(sid):
+    sway(f'[app_id="^{APP_ID}$"] move scratchpad')
+    s = next((s for s in sessions() if s['id'] == sid), None)
+    if not s:
+        return
+    if 'pid' in s:
+        if not focus(s['pid']):
+            notify(f"no sway window found for pid {s['pid']}")
+    else:
+        resume(s)
+
+
+def running_only(items):
+    return [s for s in items if 'pid' in s]
+
+
+def main():
+    arg = sys.argv[1:2]
+    if arg == ['--list']:  # fzf reload: --list all|running
+        items = sessions()
+        print('\n'.join(tree_lines(running_only(items) if sys.argv[2:3] == ['running'] else items)))
+    elif arg == ['--open']:
+        open_session(sys.argv[2])
+    elif arg == ['--first']:  # fzf action: cursor to the first session line
+        n = next((i for i, line in enumerate(tree_lines(running_only(sessions())), 1) if not line.startswith('dir:')), None)
+        if n:
+            print(f'pos({n})')
+    elif arg == ['--enter']:
+        enter_action(sys.argv[2])
+    elif arg == ['--resume-here']:
+        resume_here(sys.argv[2])
+    elif arg == ['--focus']:
+        s = next((s for s in sessions() if s['id'] == sys.argv[2]), None)
+        if s and 'pid' in s and not focus(s['pid']):
+            notify(f"no sway window found for pid {s['pid']}")
+    elif arg == ['--info']:
+        info(sys.argv[2])
+    elif arg == ['--delete']:
+        delete_sessions(sys.argv[2:])
+    elif arg in (['--hide'], ['--toggle'], ['--start']) and not SWAY:
+        sys.exit(f'{arg[0]} needs sway')
+    elif arg == ['--hide']:
+        sway(f'[app_id="^{APP_ID}$"] move scratchpad')
+    elif arg == ['--toggle']:
+        toggle()
+    elif arg == ['--start']:
+        picker_window() or start()
+    elif arg in ([], ['--window']):
+        picker(window=bool(arg))
+    else:
+        sys.exit(__doc__)
+
+
+def picker(window):
+    me = shlex.quote(ME)
+    flip = (f'[[ $FZF_PROMPT == all* ]] && echo "change-prompt(running> )+reload({me} --list running)"'
+            f' || echo "change-prompt(all> )+reload({me} --list all)"')
+    if window:
+        mode = [f'--listen={SOCKET}', f'--bind=enter:execute-silent({me} --open {{1}})',
+                f'--bind=esc:execute-silent({me} --hide)']
+    else:
+        mode = [f'--bind=enter:transform:{me} --enter {{1}}']
+    running = f'{GREEN}●{RESET} running: focus   ' if SWAY or window else ''
+    os.execvp('fzf', ['fzf', '--ansi', '--delimiter=\t', '--with-nth=2', '--layout=reverse',
+                      '--no-sort', '--tiebreak=index', '--prompt=running> ', '--track', '--id-nth=1', *mode,
+                      f'--bind=start:reload({me} --list running)', f'--bind=load:transform({me} --first)+unbind(load)',
+                      f'--bind=ctrl-a:transform:{flip}',
+                      f'--bind=del:execute-silent({me} --delete {{1}})+transform:{REFRESH}',
+                      f'--preview={me} --info {{1}}', '--preview-window=right,45%,wrap',
+                      '--bind=tab:ignore',
+                      '--header', f'{running}{RED}●{RESET} stopped: resume'
+                                  f'   ctrl-a: all/running   esc: {"hide" if window else "quit"}\n'
+                                  'del: move the stopped session to the trash'])
+
+
+if __name__ == '__main__':
+    main()
