@@ -112,6 +112,31 @@ It doesn't touch your sway session, your Claude sessions or your trash.
 - **Focus** needs `claude` to run directly in a terminal window. Inside tmux or screen its ancestor is the multiplexer's server, not a window, so it isn't found.
 - **Several windows of one terminal process** (e.g. `alacritty msg create-window`, `foot --server`): the first window of that process is focused.
 
+## Other window managers
+
+Focusing works only on sway so far. For another window manager, it needs two things:
+
+1. a list of windows with the pid of the process that owns each one
+2. a command that focuses a window by its ID
+
+The walk from `claude` up its parent processes stays the same; each window manager would be a small backend, picked by its environment variable. None of these are implemented or tested:
+
+| window manager | list windows with pid | focus |
+|---|---|---|
+| sway (implemented) | `swaymsg -t get_tree` | `swaymsg '[con_id=N] focus'` |
+| Hyprland | `hyprctl clients -j` | `hyprctl dispatch focuswindow pid:N` |
+| niri | `niri msg --json windows` | `niri msg action focus-window --id N` |
+| X11 (i3, GNOME/KDE/Xfce on X11, …) | `wmctrl -lp` | `wmctrl -ia ID` |
+| KDE Plasma on Wayland | no CLI; KWin scripting over D-Bus (e.g. `kdotool`) | same |
+| GNOME on Wayland | not possible without a GNOME Shell extension that offers it over D-Bus | |
+| river, labwc, Wayfire, other wlroots compositors | `wlrctl` (its protocol has no pid, only app_id and title) | `wlrctl toplevel focus title:…` |
+
+Where there is no pid, the window could be found by title instead: Claude Code sets the terminal title to the session title.
+
+Inside tmux, focusing would mean switching to the pane whose tty is the session's tty (`tmux list-panes -a -F '#{pane_tty} #{pane_id}'`, then `switch-client`).
+
+The hidden window mode is sway-specific (scratchpad). Hyprland has special workspaces for this; elsewhere the picker would be a normal terminal opened by a hotkey.
+
 ## License
 
 [WTFPL](http://www.wtfpl.net/), see `LICENSE`.
