@@ -88,7 +88,7 @@ def tilde(path):
 
 
 def tree_lines(items):
-    """fzf lines "id<TAB>display", directories as nodes, sessions as leaves"""
+    """fzf lines "id<TAB>display<TAB>running|stopped|dir", directories as nodes, sessions as leaves"""
     root = {'dirs': {}, 'sessions': []}
     for s in items:
         node = root
@@ -107,13 +107,14 @@ def tree_lines(items):
             if kind == 's':
                 color = GREEN if 'pid' in k else RED
                 when = time.strftime('%m-%d %H:%M', time.localtime(k['mtime']))
-                lines.append(f"{k['id']}\t{DIM}{branch}{RESET}{color}●{RESET} {k['title'] or '(untitled)'} {DIM}{when}{RESET}")
+                lines.append(f"{k['id']}\t{DIM}{branch}{RESET}{color}●{RESET} {k['title'] or '(untitled)'} {DIM}{when}{RESET}"
+                             f"\t{'running' if 'pid' in k else 'stopped'}")
             else:
                 name, child = k, node['dirs'][k]
                 while not child['sessions'] and len(child['dirs']) == 1:  # collapse a/b/c
                     (sub, child), = child['dirs'].items()
                     name += '/' + sub
-                lines.append(f"dir:{path}/{name}\t{DIM}{branch}{RESET}{BOLD}{name}/{RESET}")
+                lines.append(f"dir:{path}/{name}\t{DIM}{branch}{RESET}{BOLD}{name}/{RESET}\tdir")
                 walk(child, prefix + ('   ' if last else '│  '), f'{path}/{name}')
 
     walk(root, '', '')
@@ -400,6 +401,10 @@ def picker(window):
     else:
         mode = [f'--bind=enter:transform:{me} --enter {{1}}']
     running = f'{GREEN}●{RESET} running: focus   ' if SWAY or window else ''
+    keys = f'{running}{RED}●{RESET} stopped: resume   ctrl-a: all/running   esc: {"hide" if window else "quit"}'
+    # second line: the Delete hint on a stopped session, else blank (keeps the list from jumping)
+    header = (f'[[ {{3}} == stopped ]] && printf "%s\\n%s" {shlex.quote(keys)} "del: move the stopped session to the trash"'
+              f' || printf "%s\\n " {shlex.quote(keys)}')
     os.execvp('fzf', ['fzf', '--ansi', '--delimiter=\t', '--with-nth=2', '--layout=reverse',
                       '--no-sort', '--tiebreak=index', '--prompt=running> ', '--track', '--id-nth=1', *mode,
                       f'--bind=start:reload({me} --list running)',
@@ -410,9 +415,7 @@ def picker(window):
                       f'--bind=del:execute-silent({me} --delete {{1}})+transform:{REFRESH}',
                       f'--preview={me} --info {{1}}', '--preview-window=right,45%,wrap',
                       '--bind=tab:ignore',
-                      '--header', f'{running}{RED}●{RESET} stopped: resume'
-                                  f'   ctrl-a: all/running   esc: {"hide" if window else "quit"}\n'
-                                  'del: move the stopped session to the trash'])
+                      '--header', f'{keys}\n ', f'--bind=focus:transform-header:{header}'])
 
 
 if __name__ == '__main__':

@@ -101,12 +101,16 @@ tmux send-keys -t "$T" C-a
 wait_for Alpha
 for _ in 1 2 3 4; do [[ $(current) == r1 ]] && break; tmux send-keys -t "$T" Down; sleep 0.2; done
 check "cursor on the running session" "$(current)" r1
+sleep 0.3
+check "no Delete hint on a running session" "$(screen | grep -c 'del: move' || true)" 0
 tmux send-keys -t "$T" DC
 sleep 1
 check "Delete keeps a running session" "$(ls "$C/projects/-p" | tr '\n' ' ')" "h1.jsonl r1.jsonl s1 s1.jsonl s2.jsonl "
 check "notification" "$(cat "$H/notify.log")" "claude-sessions 1 running session(s) not deleted"
 for _ in 1 2 3 4; do [[ $(current) == s1 ]] && break; tmux send-keys -t "$T" Down; sleep 0.2; done
 check "cursor on a stopped session" "$(current)" s1
+sleep 0.3
+check "Delete hint on a stopped session" "$(screen | grep -c 'del: move')" 1
 tmux send-keys -t "$T" DC
 wait_for ' 3/3 '
 for _ in $(seq 25); do screen | grep -q "● Alpha" || break; sleep 0.2; done  # rows redraw after the count
@@ -142,7 +146,9 @@ check "down skips folders" "$(moves Down Down Down Down)" "x2 y1 q1 q1"
 check "up skips folders, stops at the first session" "$(moves Up Up Up Up)" "y1 x2 x1 x1"
 tmux send-keys -t "$T" C-j C-j; sleep 0.8
 check "ctrl-j skips folders too" "$(current)" y1
-tmux send-keys -t "$T" D e l t; sleep 0.8
+tmux send-keys -t "$T" r u n n i n g; sleep 0.8
+check "the hidden status field isn't searchable" "$(curl -s --unix-socket "$R/claude-sessions.sock" 'http://localhost?limit=0' | jq .matchCount)" 0
+tmux send-keys -t "$T" C-u D e l t; sleep 0.8
 check "filter result: cursor on a session" "$(current)" q1
 tmux send-keys -t "$T" C-u '/~/p/' ; sleep 1
 check "filter showing only folders: fzf still responds" "$(curl -s -m 2 --unix-socket "$R/claude-sessions.sock" 'http://localhost?limit=0' | jq -r .query)" "/~/p/"

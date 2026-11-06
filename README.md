@@ -104,7 +104,7 @@ make test
 
 `test.sh` builds a fake Claude directory in a temporary `HOME` (stopped sessions, a "running" one backed by a `sleep` process, a headless one) with stubs for `claude` and `notify-send`, and:
 
-- drives the picker in a detached tmux session: listing, details pane, skipping folder lines, Tab (ignored), Enter, ctrl-a, Delete
+- drives the picker in a detached tmux session: listing, details pane, skipping folder lines, Tab (ignored), Enter, ctrl-a, Delete and its hint
 - runs the window mode in a headless nested sway, once with Alacritty and once with foot: `--start`, `--toggle`, focusing a running session's window, resuming a stopped one in a new window
 
 It doesn't touch your sway session, your Claude sessions or your trash.
