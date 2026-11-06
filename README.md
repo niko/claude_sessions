@@ -1,4 +1,4 @@
-# sway_claude_sessions
+# claude_sessions
 
 A session picker for [Claude Code](https://claude.com/claude-code): your Claude sessions as a tree of their working directories, in any terminal, and on [sway](https://swaywm.org) one hotkey away.
 
@@ -27,7 +27,7 @@ What needs sway: the window mode and focusing a running session. Listing, detail
 
 ## Requirements
 
-- Python 3, fzf (tested with 0.74), `gio` (glib2), `notify-send` (optional)
+- Python 3, fzf 0.71 or newer (tested with 0.74), `gio` (glib2), `notify-send` (optional)
 - window mode: sway, curl, and Alacritty or foot
 - for the test: tmux, jq; sway, Alacritty and foot for the window mode tests
 
@@ -35,6 +35,19 @@ On Fedora:
 
 ```sh
 sudo dnf install fzf glib2 libnotify curl alacritty
+```
+
+On Ubuntu:
+
+```sh
+sudo apt install libglib2.0-bin libnotify-bin curl alacritty
+```
+
+Ubuntu's fzf is too old (24.04: 0.44, 26.04: 0.67), so install fzf from its [releases](https://github.com/junegunn/fzf/releases), e.g.:
+
+```sh
+mkdir -p ~/.local/bin
+curl -L https://github.com/junegunn/fzf/releases/download/v0.74.5/fzf-0.74.5-linux_amd64.tar.gz | tar -xz -C ~/.local/bin
 ```
 
 ## Install
