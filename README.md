@@ -54,9 +54,7 @@ curl -L https://github.com/junegunn/fzf/releases/download/v0.74.5/fzf-0.74.5-lin
 ## Install
 
 ```sh
-make install            # into ~/.local/bin
-make install PREFIX=/usr/local
-make uninstall
+install -Dm755 claude-sessions ~/.local/bin/claude-sessions
 ```
 
 ## sway config
@@ -99,7 +97,7 @@ These are Claude Code's internal files, not a public interface (tested with Clau
 ## Test
 
 ```sh
-make test
+./test.sh
 ```
 
 `test.sh` builds a fake Claude directory in a temporary `HOME` (stopped sessions, a "running" one backed by a `sleep` process, a headless one) with stubs for `claude` and `notify-send`, and:
