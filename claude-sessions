@@ -336,6 +336,19 @@ def running_only(items):
     return [s for s in items if 'pid' in s]
 
 
+def skip(direction, n, line_id, steps):
+    """fzf action moving the cursor off a folder line: one more step in direction,
+    then check again; turns around at the top, gives up after a full pass"""
+    count = int(os.environ.get('FZF_MATCH_COUNT', 0))
+    if not line_id.startswith('dir:') or steps > count:
+        return
+    if direction == 'up' and n == 0:
+        direction = 'down'
+    elif direction == 'down' and n >= count - 1:
+        direction = 'up'
+    print(f'{direction}+transform({shlex.quote(ME)} --skip {direction} {{n}} {{1}} {steps + 1})')
+
+
 def main():
     arg = sys.argv[1:2]
     if arg == ['--list']:  # fzf reload: --list all|running
@@ -343,10 +356,8 @@ def main():
         print('\n'.join(tree_lines(running_only(items) if sys.argv[2:3] == ['running'] else items)))
     elif arg == ['--open']:
         open_session(sys.argv[2])
-    elif arg == ['--first']:  # fzf action: cursor to the first session line
-        n = next((i for i, line in enumerate(tree_lines(running_only(sessions())), 1) if not line.startswith('dir:')), None)
-        if n:
-            print(f'pos({n})')
+    elif arg == ['--skip']:  # fzf action: --skip up|down {n} {1} steps
+        skip(sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5]))
     elif arg == ['--enter']:
         enter_action(sys.argv[2])
     elif arg == ['--resume-here']:
@@ -373,6 +384,12 @@ def main():
         sys.exit(__doc__)
 
 
+def off_folder(direction):
+    """fzf transform: on a folder line, let --skip move on (checked in the shell first,
+    so that session lines don't start Python on every move and keystroke)"""
+    return f'[[ {{1}} == dir:* ]] && echo "transform({shlex.quote(ME)} --skip {direction} {{n}} {{1}} 0)"'
+
+
 def picker(window):
     me = shlex.quote(ME)
     flip = (f'[[ $FZF_PROMPT == all* ]] && echo "change-prompt(running> )+reload({me} --list running)"'
@@ -385,7 +402,10 @@ def picker(window):
     running = f'{GREEN}●{RESET} running: focus   ' if SWAY or window else ''
     os.execvp('fzf', ['fzf', '--ansi', '--delimiter=\t', '--with-nth=2', '--layout=reverse',
                       '--no-sort', '--tiebreak=index', '--prompt=running> ', '--track', '--id-nth=1', *mode,
-                      f'--bind=start:reload({me} --list running)', f'--bind=load:transform({me} --first)+unbind(load)',
+                      f'--bind=start:reload({me} --list running)',
+                      f'--bind=up,ctrl-k,ctrl-p:up+transform:{off_folder("up")}',
+                      f'--bind=down,ctrl-j,ctrl-n:down+transform:{off_folder("down")}',
+                      f'--bind=result:transform:{off_folder("down")}',
                       f'--bind=ctrl-a:transform:{flip}',
                       f'--bind=del:execute-silent({me} --delete {{1}})+transform:{REFRESH}',
                       f'--preview={me} --info {{1}}', '--preview-window=right,45%,wrap',

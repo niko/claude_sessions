@@ -109,9 +109,45 @@ for _ in 1 2 3 4; do [[ $(current) == s1 ]] && break; tmux send-keys -t "$T" Dow
 check "cursor on a stopped session" "$(current)" s1
 tmux send-keys -t "$T" DC
 wait_for ' 3/3 '
+for _ in $(seq 25); do screen | grep -q "● Alpha" || break; sleep 0.2; done  # rows redraw after the count
 check "Delete trashes all files of a stopped session" "$(cd "$H/.local/share/Trash/files" && ls | sort | tr '\n' ' ')" "s1 s1.2 s1.3 s1.jsonl "
 check "trashed session gone from the list" "$(screen | grep -c "● Alpha" || true)" 0
 tmux kill-session -t "$T" 2>/dev/null || true
+
+echo "folder lines are skipped"
+H2=$H/skip
+C2=$H2/.claude
+mkdir -p "$C2/sessions"
+n=0
+for spec in x1:p/x:Alpha x2:p/x:Bravo y1:p/y:Charlie q1:q:Delta; do
+    IFS=: read -r id dir title <<<"$spec"
+    mkdir -p "$H2/$dir" "$C2/projects/-$id"
+    printf '{"type":"user","cwd":"%s","entrypoint":"cli"}\n{"type":"ai-title","aiTitle":"%s"}\n' "$H2/$dir" "$title" >"$C2/projects/-$id/$id.jsonl"
+    touch -d "$((n++)) minutes ago" "$C2/projects/-$id/$id.jsonl"
+    sleep 600 &
+    pids+=($!)
+    printf '{"pid":%s,"sessionId":"%s","cwd":"%s","procStart":"%s"}\n' "$!" "$id" "$H2/$dir" "$(awk '{print $22}' "/proc/$!/stat")" >"$C2/sessions/$!.json"
+done
+check "tree has folder lines between sessions" "$(env HOME="$H2" "$CS" --list running | cut -f1 | tr '\n' ' ')" "dir:/~ dir:/~/p dir:/~/p/x x1 x2 dir:/~/p/y y1 dir:/~/q q1 "
+tmux new-session -d -s "$T" -x 160 -y 20 "$(printf '%q ' env -u TMUX -u SWAYSOCK HOME="$H2" XDG_RUNTIME_DIR="$R" PATH="$H/bin:$PATH" "$CS" --window)"
+wait_for Delta
+sleep 0.5
+check "starts on the first session, not a folder" "$(current)" x1
+moves() {  # key... -> current item after each key
+    local out=()
+    for k in "$@"; do tmux send-keys -t "$T" "$k"; sleep 0.4; out+=("$(current)"); done
+    echo "${out[*]}"
+}
+check "down skips folders" "$(moves Down Down Down Down)" "x2 y1 q1 q1"
+check "up skips folders, stops at the first session" "$(moves Up Up Up Up)" "y1 x2 x1 x1"
+tmux send-keys -t "$T" C-j C-j; sleep 0.8
+check "ctrl-j skips folders too" "$(current)" y1
+tmux send-keys -t "$T" D e l t; sleep 0.8
+check "filter result: cursor on a session" "$(current)" q1
+tmux send-keys -t "$T" C-u '/~/p/' ; sleep 1
+check "filter showing only folders: fzf still responds" "$(curl -s -m 2 --unix-socket "$R/claude-sessions.sock" 'http://localhost?limit=0' | jq -r .query)" "/~/p/"
+tmux kill-session -t "$T" 2>/dev/null || true
+rm -f "$R/claude-sessions.sock"
 
 # --- sway window mode in a headless nested sway
 window_mode() {  # terminal
